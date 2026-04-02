@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
-
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'providers/auth_provider.dart';
 import 'screens/dashboard_screen.dart';
 import 'screens/auth_screen.dart'; // We are going to build this next!
@@ -31,6 +31,16 @@ class FinanceWiseApp extends ConsumerWidget {
     return MaterialApp(
       title: 'FinanceWise',
       debugShowCheckedModeBanner: false,
+      locale: const Locale('en', 'IN'), 
+      supportedLocales: const [
+        Locale('en', 'US'),
+        Locale('en', 'IN'), 
+      ],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       theme: ThemeData(
         useMaterial3: true,
         brightness: Brightness.dark,

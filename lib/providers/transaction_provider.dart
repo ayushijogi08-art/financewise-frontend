@@ -18,7 +18,9 @@ enum AnalyticsFilter { thisMonth, lastMonth }
 final analyticsFilterProvider = StateProvider<AnalyticsFilter>((ref) => AnalyticsFilter.thisMonth);
 
 final selectedDateProvider = StateProvider<DateTime?>((ref) => null);
-
+final searchQueryProvider = StateProvider<String>((ref) => '');
+// Tracks if the database is actively downloading from the cloud
+final isTransactionLoadingProvider = StateProvider<bool>((ref) => true);
 final safetyPercentageProvider = StateNotifierProvider<SafetyPercentageNotifier, double>((ref) {
   return SafetyPercentageNotifier();
 });
@@ -76,6 +78,10 @@ class TransactionNotifier extends Notifier<List<Transaction>> {
     if (token == null || _isLoadingMore) return; 
     if (isLoadMore && !_hasMore) return; // Stop if we reached the end
 
+if (!isLoadMore && state.isEmpty) {
+      ref.read(isTransactionLoadingProvider.notifier).state = true;
+    }
+
     if (isLoadMore) {
       _isLoadingMore = true;
       _currentPage++;
@@ -85,8 +91,9 @@ class TransactionNotifier extends Notifier<List<Transaction>> {
     }
 
     try {
+      final fetchLimit = isLoadMore ? 20 : 100;
       final response = await http.get(
-        Uri.parse('$_apiUrl?page=$_currentPage&limit=20'), // 👈 Send page data to backend
+        Uri.parse('$_apiUrl?page=$_currentPage&limit=$fetchLimit'), // 👈 Send page data to backend
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $token', 
@@ -105,6 +112,7 @@ class TransactionNotifier extends Notifier<List<Transaction>> {
           state = [...state, ...newItems]; // APPEND to bottom
         } else {
           state = newItems; // REPLACE (Page 1)
+          _checkAndAddRecurring(newItems);
         }
         print("✅ HISTORY LOADED: Displaying ${state.length} transactions.");
       } else {
@@ -114,10 +122,11 @@ class TransactionNotifier extends Notifier<List<Transaction>> {
       print("🚨 API Connection Error: $e");
     } finally {
       _isLoadingMore = false;
+      ref.read(isTransactionLoadingProvider.notifier).state = false;
     }
   }
 
-  // 👈 CALL THIS FROM YOUR UI WHEN SCROLLING DOWN
+
   void loadNextPage() {
     if (_hasMore && !_isLoadingMore) {
       fetchTransactions(isLoadMore: true);
@@ -125,30 +134,32 @@ class TransactionNotifier extends Notifier<List<Transaction>> {
   }
 
   // POST: Send new entry
-  Future<void> addTransaction(Transaction txn) async {
+  // POST: Send new entry
+  Future<void> addTransaction(Transaction txn, {bool autoRefresh = true}) async {
     final token = ref.read(authProvider);
     if (token == null) return;
+
+ref.read(isTransactionLoadingProvider.notifier).state = true;
 
     try {
       final response = await http.post(
         Uri.parse(_apiUrl),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer $token' },
         body: json.encode(txn.toJson()),
       ).timeout(const Duration(seconds: 10)); 
 
       if (response.statusCode == 201) {
-        print("✅ SUCCESS: Transaction saved to MongoDB!");
-        // 🛑 DO NOT BLINDLY APPEND TO STATE
-        // We force a fresh fetch so pagination stays perfectly synced with the cloud
-        fetchTransactions(); 
+        print("✅ SUCCESS: Transaction saved!");
+        // 👇 2. FETCH FRESH DATA (This automatically turns off the skeleton when done)
+        if (autoRefresh) await fetchTransactions(); 
       } else {
-        print("🚨 SERVER REJECTED IT: ${response.body}");
+        // Turn off loading if the server rejects it
+        ref.read(isTransactionLoadingProvider.notifier).state = false;
       }
     } catch (e) {
-      print("🚨 FLUTTER NETWORK CRASH: $e");
+      // Turn off loading if the internet crashes
+      ref.read(isTransactionLoadingProvider.notifier).state = false;
+      print("🚨 NETWORK CRASH: $e");
     }
   }
 
@@ -215,6 +226,70 @@ class TransactionNotifier extends Notifier<List<Transaction>> {
       isRecurring: false,
     );
     addTransaction(adjustmentTxn);
+  }
+  Future<void> _checkAndAddRecurring(List<Transaction> recentTxns) async {
+    final now = DateTime.now();
+    bool addedAny = false;
+
+    // 1. Find all transactions that are marked as recurring
+    final recurringTemplates = recentTxns.where((t) => t.isRecurring).toList();
+
+    // 2. Make a list of everything we've ALREADY added THIS month
+    final thisMonthTitles = recentTxns
+        .where((t) => t.date.month == now.month && t.date.year == now.year)
+        .map((t) => t.title.toLowerCase())
+        .toSet();
+
+    // 3. Check every recurring template
+    for (var template in recurringTemplates) {
+      if ((template.date.month < now.month || template.date.year < now.year) &&
+          !thisMonthTitles.contains(template.title.toLowerCase())) {
+        
+        print("🤖 AUTO-PILOT: Adding recurring entry for '${template.title}'");
+
+        int targetDay = template.date.day;
+        
+        // Safety check: Prevents crashing on months without 31 days (e.g. Feb 31st)
+        int maxDaysInCurrentMonth = DateTime(now.year, now.month + 1, 0).day;
+        if (targetDay > maxDaysInCurrentMonth) {
+          targetDay = maxDaysInCurrentMonth;
+        }
+
+        // Create the new date keeping the original day and time, but updating the month/year
+        DateTime exactBillingDate = DateTime(
+          now.year, 
+          now.month, 
+          targetDay, 
+          template.date.hour, 
+          template.date.minute
+        );
+if (now.isAfter(exactBillingDate) || now.day == targetDay) {
+          print("🤖 AUTO-PILOT: Adding recurring entry for '${template.title}'");
+
+        final newTxn = Transaction(
+          id: const Uuid().v4(),
+          title: template.title,
+          amount: template.amount,
+          isExpense: template.isExpense,
+          category: template.category,
+          date: exactBillingDate, // Stamps it with today's date!
+          isRecurring: true, // Keeps it recurring for the future
+        );
+
+        // Save it to the cloud silently
+        await addTransaction(newTxn, autoRefresh: false); 
+        addedAny = true;
+        thisMonthTitles.add(template.title.toLowerCase()); 
+      }else {
+          // It's not time yet!
+          print("⏳ AUTO-PILOT: Skipping '${template.title}', due on ${exactBillingDate.day}");
+        }
+      }
+    }
+
+    // 4. If the engine added new bills, refresh the dashboard so the user sees them!
+    if (addedAny) fetchTransactions();
+    
   }
 }
 final transactionProvider = NotifierProvider<TransactionNotifier, List<Transaction>>(TransactionNotifier.new);

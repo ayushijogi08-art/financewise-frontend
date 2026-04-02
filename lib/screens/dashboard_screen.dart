@@ -18,7 +18,8 @@ import 'add_transaction_screen.dart';
 import 'add_goal_screen.dart';
 import 'analytics_screen.dart';
 
-
+final dashboardPageProvider = StateProvider<int>((ref) => 0);
+final searchQueryProvider = StateProvider<String>((ref) => '');
 class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
 
@@ -32,18 +33,39 @@ class DashboardScreen extends ConsumerWidget {
     // --- LIST & FILTER LOGIC ---
     final allTransactions = ref.watch(transactionProvider);
     final selectedDate = ref.watch(selectedDateProvider);
-    
+    final searchQuery = ref.watch(searchQueryProvider);
+
     // Filter by Date if one is selected
-    final displayedTransactions = selectedDate == null 
-        ? allTransactions.toList()
-        : allTransactions.where((t) => 
-            t.date.year == selectedDate.year && 
-            t.date.month == selectedDate.month && 
-            t.date.day == selectedDate.day
-          ).toList();
+    final displayedTransactions = allTransactions.where((t) {
+      final matchesDate = selectedDate == null || 
+          (t.date.year == selectedDate.year && t.date.month == selectedDate.month && t.date.day == selectedDate.day);
+      
+      final matchesSearch = searchQuery.isEmpty || 
+          t.title.toLowerCase().contains(searchQuery.toLowerCase());
+          
+      return matchesDate && matchesSearch;
+    }).toList();
 
     // Sort: Newest First
     displayedTransactions.sort((a, b) => b.date.compareTo(a.date));
+
+final currentPage = ref.watch(dashboardPageProvider);
+    const itemsPerPage = 10;
+    final totalItems = displayedTransactions.length;
+    final totalPages = (totalItems / itemsPerPage).ceil();
+
+    // Safety check: If items are deleted, push the user back to a valid page
+    int safePage = currentPage;
+    if (safePage >= totalPages && totalPages > 0) {
+      safePage = totalPages - 1;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ref.read(dashboardPageProvider.notifier).state = safePage;
+      });
+    }
+
+    final startIndex = safePage * itemsPerPage;
+    final endIndex = (startIndex + itemsPerPage > totalItems) ? totalItems : startIndex + itemsPerPage;
+    final paginatedTransactions = displayedTransactions.sublist(startIndex, endIndex);
 
     final goals = ref.watch(goalProvider);
     final report = ref.watch(monthlyReportProvider);
@@ -76,6 +98,7 @@ class DashboardScreen extends ConsumerWidget {
 
     final availableBalance = netBalance; // Simplified for visual
     final nudges = ref.watch(nudgeProvider);
+    final isLoading = ref.watch(isTransactionLoadingProvider);
 
     // 2. STEALTH PREMIUM PALETTE
     const obsidian = Color(0xFF050505); 
@@ -134,13 +157,7 @@ class DashboardScreen extends ConsumerWidget {
     Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
   }
   else if (value == 'pdf') {
-    // PDF EXPORT
-    if (allTransactions.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No data to export!")));
-      return;
-    }
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Generating Statement...")));
-    await PdfService().generateAndDownloadStatement(allTransactions, goals);
+    _showExportDialog(context, ref, allTransactions, goals);
   }
   else if (value == 'logout') { 
     // THE NEW LOGOUT TRIGGER
@@ -482,10 +499,12 @@ itemBuilder: (BuildContext context) => [
                       
                       if (picked != null) {
                         ref.read(selectedDateProvider.notifier).state = picked;
+                        ref.read(dashboardPageProvider.notifier).state = 0;
                       }
                     },
                     onLongPress: () {
                       ref.read(selectedDateProvider.notifier).state = null;
+                      ref.read(dashboardPageProvider.notifier).state = 0;
                       HapticFeedback.mediumImpact();
                       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Showing All History"), duration: Duration(seconds: 1)));
                     },
@@ -505,28 +524,128 @@ itemBuilder: (BuildContext context) => [
                             style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: selectedDate != null ? Colors.black : Colors.white70)
                           ),
                         ],
-                      ),
+                     ),
                     ),
                   ),
                 ],
               ),
               
+              const SizedBox(height: 15),
+              
+              // 👇 THE NEW STEALTH SEARCH BAR 👇
+              TextField(
+                onChanged: (value) {
+                  ref.read(searchQueryProvider.notifier).state = value;
+                  ref.read(dashboardPageProvider.notifier).state = 0; // Reset pagination on search
+                },
+                style: const TextStyle(color: Colors.white, fontSize: 14),
+                decoration: InputDecoration(
+                  hintText: "Search transactions...",
+                  hintStyle: const TextStyle(color: Colors.white24),
+                  prefixIcon: const Icon(Icons.search, color: Colors.white24, size: 20),
+                  filled: true,
+                  fillColor: Colors.white.withOpacity(0.04),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12), 
+                    borderSide: BorderSide.none
+                  ),
+                ),
+              ),
+              
               const SizedBox(height: 20),
               
-              if (displayedTransactions.isEmpty)
+              // 1. INITIAL LOAD (App just opened, no data yet)
+              if (isLoading && displayedTransactions.isEmpty)
+                ListView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: 5,
+                  itemBuilder: (context, index) => _buildSkeletonTile(cardSurface),
+                )
+              
+              // 2. EMPTY STATE
+              else if (displayedTransactions.isEmpty)
                 selectedDate == null 
                   ? _buildEmptyState(context)
                   : _emptyBox("NO TRANSACTIONS ON THIS DATE")
-              else 
-                ListView.builder(
-                  shrinkWrap: true, // IMPORTANT: Allows list inside ScrollView
-                  physics: const NeverScrollableScrollPhysics(), // Disables list's own scrolling
-                  itemCount: displayedTransactions.length,
-                  itemBuilder: (context, index) {
-                    return _stealthTile(context, displayedTransactions[index], cardSurface);
-                  },
-                ),
               
+              // 3. HAS DATA (Show List, and insert 1 skeleton at the top if saving!)
+              else 
+                Column(
+                  children: [
+                    ListView.builder(
+                      shrinkWrap: true, 
+                      physics: const NeverScrollableScrollPhysics(), 
+                      // Add 1 extra slot if we are currently saving to the database
+                      itemCount: isLoading ? paginatedTransactions.length + 1 : paginatedTransactions.length,
+                      itemBuilder: (context, index) {
+                        
+                        // 👇 If loading, force the very first slot to be a Skeleton!
+                        if (isLoading && index == 0) {
+                          return _buildSkeletonTile(cardSurface);
+                        }
+                        
+                        // Shift the actual real transactions down by 1 to make room
+                        final actualIndex = isLoading ? index - 1 : index;
+                        return _stealthTile(context, paginatedTransactions[actualIndex], cardSurface);
+                      },
+                    ),
+                    
+                    // 👇 THE NEW PAGINATION BUTTONS 👇
+                    if (totalPages > 1)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 15),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            // Previous Button
+                            ElevatedButton.icon(
+                              onPressed: safePage > 0 
+                                ? () => ref.read(dashboardPageProvider.notifier).state = safePage - 1 
+                                : null,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.white.withOpacity(0.05),
+                                foregroundColor: luxuryGold,
+                                disabledBackgroundColor: Colors.transparent,
+                                disabledForegroundColor: Colors.white10,
+                                elevation: 0,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                              ),
+                              icon: const Icon(Icons.chevron_left, size: 16),
+                              label: const Text("PREV", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                            ),
+                            
+                            // Page Indicator
+                            Text("Page ${safePage + 1} of $totalPages", 
+                              style: const TextStyle(color: Colors.white38, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1)),
+                            
+                            // Next Button
+                            ElevatedButton(
+                              onPressed: safePage < totalPages - 1 
+                                ? () => ref.read(dashboardPageProvider.notifier).state = safePage + 1 
+                                : null,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.white.withOpacity(0.05),
+                                foregroundColor: luxuryGold,
+                                disabledBackgroundColor: Colors.transparent,
+                                disabledForegroundColor: Colors.white10,
+                                elevation: 0,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                              ),
+                              child: const Row(
+                                children: [
+                                  Text("NEXT", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                                  SizedBox(width: 4),
+                                  Icon(Icons.chevron_right, size: 16),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
               const SizedBox(height: 80),
             ],
           ),
@@ -631,6 +750,7 @@ itemBuilder: (BuildContext context) => [
         default: return Icons.category;
       }
     }
+   
 
     // --- FIXED HELPER FUNCTION ---
     void processDeletion() {
@@ -761,6 +881,44 @@ itemBuilder: (BuildContext context) => [
     ))
   );
 
+ // ============================================================
+  // SKELETON LOADER UI
+  // ============================================================
+  Widget _buildSkeletonTile(Color bg) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: bg.withOpacity(0.4), // Slightly dimmer background
+        borderRadius: BorderRadius.circular(18)
+      ),
+      child: Row(
+        children: [
+          // Fake Icon
+          Container(
+            width: 44, height: 44, 
+            decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(14))
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Fake Title
+                Container(width: 120, height: 14, decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(4))),
+                const SizedBox(height: 8),
+                // Fake Date
+                Container(width: 80, height: 10, decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(4))),
+              ],
+            ),
+          ),
+          // Fake Amount
+          Container(width: 60, height: 16, decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(4))),
+        ],
+      ),
+    );
+  }
+  
   Widget _buildEmptyState(BuildContext context) {
     return Center(
       child: Column(
@@ -1395,7 +1553,226 @@ itemBuilder: (BuildContext context) => [
     );
   }
 
+ // ============================================================
+  // 🆕 NEW: PDF EXPORT BOTTOM SHEET (WITH CUSTOM DATE RANGE)
+  // ============================================================
+  void _showExportDialog(BuildContext context, WidgetRef ref, List<Transaction> allTxns, List<Goal> goals) {
+    if (allTxns.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No data to export!")));
+      return;
+    }
 
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        padding: const EdgeInsets.all(25),
+        decoration: const BoxDecoration(
+          color: Color(0xFF161616),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)))),
+            const SizedBox(height: 20),
+            Text("EXPORT STATEMENT", style: GoogleFonts.oswald(color: Colors.white, fontSize: 20, letterSpacing: 1)),
+            const SizedBox(height: 20),
+            
+            // 1. THIS MONTH
+            _exportOption(ctx, "This Month", Icons.calendar_month, () {
+              final now = DateTime.now();
+              final filtered = allTxns.where((t) => t.date.month == now.month && t.date.year == now.year).toList();
+              _triggerExport(context, filtered, goals, "This Month");
+            }),
+            const SizedBox(height: 12),
+            
+            // 2. LAST MONTH
+            _exportOption(ctx, "Last Month", Icons.history, () {
+              final now = DateTime.now();
+              final lastMonth = DateTime(now.year, now.month - 1);
+              final filtered = allTxns.where((t) => t.date.month == lastMonth.month && t.date.year == lastMonth.year).toList();
+              _triggerExport(context, filtered, goals, "Last Month");
+            }),
+            const SizedBox(height: 12),
+
+            // 3. CUSTOM RANGE (NOW USING OUR CUSTOM PREMIUM DIALOG!)
+            _exportOption(ctx, "Custom Range", Icons.date_range, () {
+              _showCustomRangeDialog(context, allTxns, goals);
+            }),
+            const SizedBox(height: 12),
+            
+            // 4. ALL TIME
+            _exportOption(ctx, "All Time", Icons.all_inclusive, () {
+              _triggerExport(context, allTxns, goals, "All Time");
+            }),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _exportOption(BuildContext ctx, String title, IconData icon, VoidCallback onTap) {
+    return InkWell(
+      onTap: () {
+        Navigator.pop(ctx); 
+        onTap(); 
+      },
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.05),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.white10)
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: const Color(0xFFD4AF37), size: 20),
+            const SizedBox(width: 15),
+            Text(title, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
+            const Spacer(),
+            const Icon(Icons.download, color: Colors.white38, size: 18),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _triggerExport(BuildContext context, List<Transaction> txns, List<Goal> goals, String period) async {
+    if (txns.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        backgroundColor: const Color(0xFF161616),
+        content: Text("No transactions found for $period!", style: const TextStyle(color: Colors.redAccent))
+      ));
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      backgroundColor: const Color(0xFF161616),
+      content: Text("Generating $period Statement...", style: const TextStyle(color: Colors.white))
+    ));
+    txns.sort((a, b) => b.date.compareTo(a.date));
+    await PdfService().generateAndDownloadStatement(txns, goals);
+  }
+
+  // ============================================================
+  // 🌟 THE PREMIUM CUSTOM DATE DIALOG (Solves Slashes & Arrows!)
+  // ============================================================
+  void _showCustomRangeDialog(BuildContext context, List<Transaction> allTxns, List<Goal> goals) {
+    final startCtrl = TextEditingController();
+    final endCtrl = TextEditingController();
+    DateTime? startDate;
+    DateTime? endDate;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setState) {
+          
+          // Function to open the standard calendar (Which HAS the < > arrows!)
+          Future<void> pickDate(bool isStart) async {
+            final picked = await showDatePicker(
+              context: context,
+              initialDate: isStart ? (startDate ?? DateTime.now()) : (endDate ?? startDate ?? DateTime.now()),
+              firstDate: isStart ? DateTime(2020) : (startDate ?? DateTime(2020)),
+              lastDate: DateTime.now(),
+              helpText: isStart ? "SELECT START DATE" : "SELECT END DATE",
+              builder: (context, child) => Theme(
+                data: Theme.of(context).copyWith(
+                  colorScheme: const ColorScheme.dark(primary: Color(0xFFD4AF37), onPrimary: Colors.black, surface: Color(0xFF161616), onSurface: Colors.white),
+                ),
+                child: child!,
+              ),
+            );
+
+            if (picked != null) {
+              setState(() {
+                if (isStart) {
+                  startDate = picked;
+                  startCtrl.text = DateFormat('dd/MM/yyyy').format(picked); // Auto-fill textbox
+                } else {
+                  endDate = picked;
+                  endCtrl.text = DateFormat('dd/MM/yyyy').format(picked); // Auto-fill textbox
+                }
+              });
+            }
+          }
+
+          return AlertDialog(
+            backgroundColor: const Color(0xFF161616),
+            title: Text("Select Date Range", style: GoogleFonts.oswald(color: Colors.white)),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // START DATE INPUT
+                TextField(
+                  controller: startCtrl,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [DateTextFormatter()], // 👈 The Auto-Slashes!
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                  decoration: InputDecoration(
+                    labelText: "Start Date (DD/MM/YYYY)",
+                    labelStyle: const TextStyle(color: Colors.white38),
+                    enabledBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+                    focusedBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFD4AF37))),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.calendar_month, color: Color(0xFFD4AF37)),
+                      onPressed: () => pickDate(true), // Opens calendar
+                    ),
+                  ),
+                  onChanged: (val) {
+                    try { if (val.length == 10) startDate = DateFormat('dd/MM/yyyy').parseStrict(val); } catch(e) {}
+                  },
+                ),
+                const SizedBox(height: 20),
+                
+                // END DATE INPUT
+                TextField(
+                  controller: endCtrl,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [DateTextFormatter()], // 👈 The Auto-Slashes!
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                  decoration: InputDecoration(
+                    labelText: "End Date (DD/MM/YYYY)",
+                    labelStyle: const TextStyle(color: Colors.white38),
+                    enabledBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+                    focusedBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFD4AF37))),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.calendar_month, color: Color(0xFFD4AF37)),
+                      onPressed: () => pickDate(false), // Opens calendar
+                    ),
+                  ),
+                  onChanged: (val) {
+                    try { if (val.length == 10) endDate = DateFormat('dd/MM/yyyy').parseStrict(val); } catch(e) {}
+                  },
+                ),
+              ]
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancel", style: TextStyle(color: Colors.white70))),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFD4AF37)),
+                onPressed: () {
+                  if (startDate != null && endDate != null) {
+                    Navigator.pop(ctx); // Close Dialog
+                    final endOfDay = DateTime(endDate!.year, endDate!.month, endDate!.day, 23, 59, 59);
+                    final filtered = allTxns.where((t) => t.date.isAfter(startDate!.subtract(const Duration(seconds: 1))) && t.date.isBefore(endOfDay)).toList();
+                    final format = DateFormat('MMM dd, yyyy');
+                    _triggerExport(context, filtered, goals, "${format.format(startDate!)} to ${format.format(endDate!)}");
+                  }
+                },
+                child: const Text("Export PDF", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+              )
+            ],
+          );
+        }
+      ),
+    );
+  }
+
+ 
 
 class ShakeWidget extends StatefulWidget {
   final Widget child;
@@ -1440,6 +1817,25 @@ class _ShakeWidgetState extends State<ShakeWidget> with SingleTickerProviderStat
           child: widget.child,
         );
       },
+    );
+  }
+}
+
+class DateTextFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(TextEditingValue oldValue, TextEditingValue newValue) {
+    String text = newValue.text.replaceAll(RegExp(r'[^0-9]'), '');
+    if (text.length > 8) text = text.substring(0, 8);
+
+    String formatted = '';
+    for (int i = 0; i < text.length; i++) {
+      if (i == 2 || i == 4) formatted += '/';
+      formatted += text[i];
+    }
+
+    return TextEditingValue(
+      text: formatted,
+      selection: TextSelection.collapsed(offset: formatted.length),
     );
   }
 }
