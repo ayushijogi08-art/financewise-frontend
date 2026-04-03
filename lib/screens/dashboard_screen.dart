@@ -99,7 +99,7 @@ final currentPage = ref.watch(dashboardPageProvider);
     final availableBalance = netBalance; // Simplified for visual
     final nudges = ref.watch(nudgeProvider);
     final isLoading = ref.watch(isTransactionLoadingProvider);
-
+    final isInitialLoad = isLoading && allTransactions.isEmpty;
     // 2. STEALTH PREMIUM PALETTE
     const obsidian = Color(0xFF050505); 
     const cardSurface = Color(0xFF161616); 
@@ -224,7 +224,7 @@ itemBuilder: (BuildContext context) => [
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text("₹", style: GoogleFonts.manrope(color: Colors.white54, fontSize: 24)),
-                        Text(availableBalance.toStringAsFixed(0), 
+                        Text(isInitialLoad ? "..." : availableBalance.toStringAsFixed(0),
                           style: GoogleFonts.manrope(color: Colors.white, fontSize: 42, fontWeight: FontWeight.w900)),
                       ],
                     ),
@@ -232,9 +232,9 @@ itemBuilder: (BuildContext context) => [
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        _stealthStat("INCOME", income, neonGreen, Icons.arrow_downward),
-                        Container(width: 1, height: 40, color: Colors.white10),
-                        _stealthStat("EXPENSE", expense, neonRed, Icons.arrow_upward),
+                        _stealthStat("INCOME", income, neonGreen, Icons.arrow_downward, isInitialLoad),
+                       Container(width: 1, height: 40, color: Colors.white10),
+                     _stealthStat("EXPENSE", expense, neonRed, Icons.arrow_upward, isInitialLoad),
                       ],
                     ),
                   ],
@@ -297,7 +297,7 @@ itemBuilder: (BuildContext context) => [
                       const SizedBox(height: 10),
                       
                       // THE BIG NUMBER (Now synced with 1%)
-                      Text("₹${safeSpend.toStringAsFixed(0)}", 
+                      Text(isInitialLoad ? "..." : "₹${safeSpend.toStringAsFixed(0)}",
                         style: GoogleFonts.manrope(color: safeSpend < 0 ? neonRed : luxuryGold, fontSize: 32, fontWeight: FontWeight.w900)),
                       
                       const SizedBox(height: 15),
@@ -474,58 +474,77 @@ itemBuilder: (BuildContext context) => [
                     ],
                   ),
                   
-                  // DATE FILTER BUTTON (Keep this as is)
-                  InkWell(
-                    onTap: () async {
-                      final picked = await showDatePicker(
-                        context: context,
-                        initialDate: selectedDate ?? DateTime.now(),
-                        firstDate: DateTime(2020),
-                        lastDate: DateTime.now(),
-                        builder: (context, child) {
-                          return Theme(
-                            data: Theme.of(context).copyWith(
-                              colorScheme: const ColorScheme.dark(
-                                primary: Color(0xFFD4AF37),
-                                onPrimary: Colors.black,
-                                surface: Color(0xFF161616),
-                                onSurface: Colors.white,
-                              ),
+                 // DATE FILTER BUTTON
+                  Row(
+                    children: [
+                      // 👇 1. THE NEW CLEAR BUTTON (Only shows if a date is selected)
+                      if (selectedDate != null)
+                        GestureDetector(
+                          onTap: () {
+                            ref.read(selectedDateProvider.notifier).state = null;
+                            ref.read(dashboardPageProvider.notifier).state = 0;
+                            HapticFeedback.lightImpact();
+                          },
+                          child: Container(
+                            margin: const EdgeInsets.only(right: 8),
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.05),
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white10),
                             ),
-                            child: child!,
-                          );
-                        }
-                      );
-                      
-                      if (picked != null) {
-                        ref.read(selectedDateProvider.notifier).state = picked;
-                        ref.read(dashboardPageProvider.notifier).state = 0;
-                      }
-                    },
-                    onLongPress: () {
-                      ref.read(selectedDateProvider.notifier).state = null;
-                      ref.read(dashboardPageProvider.notifier).state = 0;
-                      HapticFeedback.mediumImpact();
-                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Showing All History"), duration: Duration(seconds: 1)));
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: selectedDate != null ? luxuryGold : Colors.white.withOpacity(0.05),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: Colors.white10),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(Icons.calendar_today, size: 14, color: selectedDate != null ? Colors.black : Colors.white70),
-                          const SizedBox(width: 6),
-                          Text(
-                            selectedDate == null ? "ALL" : DateFormat('MMM dd').format(selectedDate), 
-                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: selectedDate != null ? Colors.black : Colors.white70)
+                            child: const Icon(Icons.close, size: 14, color: Colors.white70),
                           ),
-                        ],
-                     ),
-                    ),
+                        ),
+                      
+                      // 2. THE MAIN CALENDAR BUTTON
+                      InkWell(
+                        onTap: () async {
+                          final picked = await showDatePicker(
+                            context: context,
+                            initialDate: selectedDate ?? DateTime.now(),
+                            firstDate: DateTime(2020),
+                            lastDate: DateTime.now(),
+                            builder: (context, child) {
+                              return Theme(
+                                data: Theme.of(context).copyWith(
+                                  colorScheme: const ColorScheme.dark(
+                                    primary: Color(0xFFD4AF37),
+                                    onPrimary: Colors.black,
+                                    surface: Color(0xFF161616),
+                                    onSurface: Colors.white,
+                                  ),
+                                ),
+                                child: child!,
+                              );
+                            }
+                          );
+                          
+                          if (picked != null) {
+                            ref.read(selectedDateProvider.notifier).state = picked;
+                            ref.read(dashboardPageProvider.notifier).state = 0;
+                          }
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: selectedDate != null ? const Color(0xFFD4AF37) : Colors.white.withOpacity(0.05),
+                            borderRadius: BorderRadius.circular(20),
+                            border: Border.all(color: Colors.white10),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(Icons.calendar_today, size: 14, color: selectedDate != null ? Colors.black : Colors.white70),
+                              const SizedBox(width: 6),
+                              Text(
+                                selectedDate == null ? "ALL" : DateFormat('MMM dd').format(selectedDate), 
+                                style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: selectedDate != null ? Colors.black : Colors.white70)
+                              ),
+                            ],
+                           ),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -678,7 +697,7 @@ itemBuilder: (BuildContext context) => [
     );
   }
 
-  Widget _stealthStat(String label, double amount, Color color, IconData icon) {
+  Widget _stealthStat(String label, double amount, Color color, IconData icon, bool isInitialLoad) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -690,7 +709,8 @@ itemBuilder: (BuildContext context) => [
           ],
         ),
         const SizedBox(height: 6),
-        Text("₹${amount.toInt()}", style: TextStyle(color: color, fontSize: 22, fontWeight: FontWeight.w900)),
+        // 👇 Now it shows ... if loading, otherwise the real amount!
+        Text(isInitialLoad ? "..." : "₹${amount.toInt()}", style: TextStyle(color: color, fontSize: 22, fontWeight: FontWeight.w900)),
       ],
     );
   }

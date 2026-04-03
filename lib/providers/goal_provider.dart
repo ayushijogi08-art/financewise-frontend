@@ -81,11 +81,15 @@ final goalAnalysisProvider = Provider.family<GoalAnalysis, Goal>((ref, goal) {
 class GoalNotifier extends Notifier<List<Goal>> {
   @override
   List<Goal> build() {
-    ref.listen(authProvider, (previous, next) {
-    if (previous != null) {
-      ref.invalidateSelf();
-    }
-  });
+   ref.listen(authProvider, (previous, next) {
+      if (next != null) {
+        // User logged in -> Fetch goals immediately!
+        fetchGoals(); 
+      } else {
+        // User logged out -> Clear the dashboard!
+        state = []; 
+      }
+    });
     fetchGoals();
     return [];
   }
